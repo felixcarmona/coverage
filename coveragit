@@ -1,0 +1,114 @@
+#!/usr/bin/env python
+from xml.dom import minidom
+from os import popen, getcwd, path
+import re
+import sys
+import argparse
+
+
+def get_uncovered_code(xml):
+    if not path.isfile(xml):
+        print("\033[41m\033[37m No such coverage .xml file '%s'\033[m" % xml)
+        sys.exit(2)
+
+    try:
+        xml_doc = minidom.parse(xml)
+
+        files_dom = xml_doc.getElementsByTagName('file')
+
+        uncovered_code = {}
+        for file_dom in files_dom:
+            uncovered_lines = []
+
+            lines_dom = xml_doc.getElementsByTagName('line')
+            for line_dom in lines_dom:
+                count = int(line_dom.attributes['count'].value)
+                line_number = int(line_dom.attributes['num'].value)
+                if count == 0:
+                    uncovered_lines.append(line_number)
+
+            if uncovered_lines:
+                cwd = getcwd().rstrip('/') + '/'
+                file_name = file_dom.attributes['name'].value
+                file_name = re.sub('^%s' % cwd, '', file_name)
+                uncovered_code[file_name] = uncovered_lines
+
+        return uncovered_code
+    except Exception:
+        print("\033[41m\033[37m Invalid coverage .xml file '%s'\033[m" % xml)
+        sys.exit(2)
+
+
+def get_additions(base):
+    raw_diff = popen("git diff %s" % base).read().strip()
+
+    diffs = re.findall('\+\+\+\ b/(.*)\n@@\ .* \+([0-9]+),([0-9]+)?\ @@', raw_diff)
+
+    if not diffs:
+        print("\033[41m\033[37m Impossible to get the git diff \033[m")
+        sys.exit(2)
+
+    additions = {}
+
+    for diff in diffs:
+        file_name, start_line, end_line = diff
+        lines = range(int(start_line), int(end_line)+1)
+        if file_name not in additions:
+            additions[file_name] = []
+        additions[file_name] += lines
+
+    return additions
+
+
+def get_missing_coverage(uncovered_code, additions):
+    missing_coverage = {}
+
+    relevant_files = list(set(uncovered_code) & set(additions))
+
+    for file_name in relevant_files:
+        uncovered_lines = uncovered_code[file_name]
+        relevant_lines = additions[file_name]
+        uncovered_relevant_lines = list(set(uncovered_lines) & set(relevant_lines))
+        missing_coverage[file_name] = uncovered_relevant_lines
+
+    return missing_coverage
+
+
+def display_missing_coverage(missing_coverage, is_concise):
+    for file_name in missing_coverage:
+        file_lines = [''] + [file_line.rstrip() for file_line in open(file_name)]  # [''] + because lists are zero-based
+        print("\033[41m\033[37m %s \033[m" % file_name)
+        extra_printed_lines = missing_coverage[file_name][:]
+        for missing_coverage_line in missing_coverage[file_name]:
+            if not is_concise and missing_coverage_line-1 not in extra_printed_lines and missing_coverage_line > 1:
+                print("%s: %s" % (missing_coverage_line-1, file_lines[missing_coverage_line-1]))
+                extra_printed_lines.append(missing_coverage_line-1)
+
+            print("%s: \033[31m%s\033[m" % (missing_coverage_line, file_lines[missing_coverage_line]))
+
+            if not is_concise and missing_coverage_line+1 not in extra_printed_lines and missing_coverage_line < len(file_lines)-1:
+                print("%s: %s" % (missing_coverage_line+1, file_lines[missing_coverage_line+1]))
+                extra_printed_lines.append(missing_coverage_line+1)
+
+        print("")
+
+
+parser = argparse.ArgumentParser(description='Check the uncovered code lines which have been modified or added in an specific pull request or commit')
+parser.add_argument('--base', '-b', type=str, default='HEAD~1', help='Base branch, tag, commit, or history marker to compare the current revision')
+parser.add_argument('--concise', '-c', action='store_true', help='Only display the affected uncovered lines')
+parser.add_argument('--xml', '-x', type=str, default='coverage.xml', help='Path of the generated coverage .xml')
+parser.add_argument('--silently', '-s', action='store_true', help='Even with missing coverage, exit with success system exit status')
+parser.set_defaults(concise=False)
+
+args = parser.parse_args()
+
+additions = get_additions(args.base)
+uncovered_code = get_uncovered_code(args.xml)
+missing_coverage = get_missing_coverage(uncovered_code, additions)
+
+if missing_coverage:
+    display_missing_coverage(missing_coverage, args.concise)
+    if not args.silently:
+        sys.exit(2)
+else:
+    print('\033[32m100% relevant lines covered\033[m')
